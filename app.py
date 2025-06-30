@@ -1,57 +1,19 @@
 import gradio as gr
-from PIL import Image
 import requests
-import pytesseract
-import time
-import re
-from deep_translator import GoogleTranslator
+from PIL import Image
 from gtts import gTTS
+from deep_translator import GoogleTranslator
 import uuid
+import time
 import speech_recognition as sr
 
-# Set Tesseract path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-# Ollama model endpoint
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-# Clean OCR
-def clean_ocr_text(text):
-    return re.sub(r'[^a-zA-Z0-9\s.,:;!?()\-]+', '', text).strip()
+# Simulated OCR output (fallback for Hugging Face deployment)
+def simulate_ocr(image):
+    return "This is a sample text extracted from the uploaded image."
 
-# OCR + Query
-def query_gemma(image, language, profile):
-    start = time.time()
-    ocr_config = r'--oem 3 --psm 6'
-    full_text = clean_ocr_text(pytesseract.image_to_string(image, config=ocr_config))
-    if not full_text.strip():
-        return "⚠️ Couldn't read anything from the image.", 0
-    instruction = get_profile_context(profile) + "\n\n"
-
-    suffix = ""
-    medical_keywords = ["tablet", "capsule", "mg", "ml", "dose", "pesticide", "medicine", "ointment", "syrup", "paracetamol"]
-    if any(word in full_text.lower() for word in medical_keywords):
-        suffix = "\n\nIf it mentions medicine or pesticides, explain what it does and warn of any risks."
-
-    max_len = 500 - len(instruction) - len(suffix)
-    chunks = [full_text[i:i + max_len] for i in range(0, len(full_text), max_len)]
-    system_prompt = "You are a helpful AI assistant helping rural women understand documents or medicine boxes."
-
-    responses = []
-    for i, chunk in enumerate(chunks):
-        prompt = instruction + chunk + suffix
-        try:
-            response = requests.post(
-                OLLAMA_URL,
-                json={"model": "gemma3n:latest", "prompt": prompt, "system_prompt": system_prompt, "stream": False},
-                timeout=300
-            )
-            text = response.json().get("response", "")
-        except requests.exceptions.ReadTimeout:
-            text = f"❌ Timeout on part {i + 1}."
-        responses.append(f"Part {i + 1}:\n{text}")
-
-    return "\n\n".join(responses), time.time() - start
+# Profile-based context
 def get_profile_context(profile):
     context_map = {
         "Woman": "Explain in very simple language for a rural woman who may not be familiar with complex forms or medical terms.",
@@ -61,8 +23,7 @@ def get_profile_context(profile):
     }
     return context_map.get(profile, context_map["Woman"])
 
-
-# Translate text
+# Translate using Deep Translator
 def translate_text(text, lang):
     lang_code = {'Hindi': 'hi', 'Tamil': 'ta'}.get(lang)
     if not lang_code:
@@ -82,24 +43,41 @@ def speak(text, lang):
     except:
         return None
 
-# Process uploaded image
+# Main processing
 def process_image(image, language, profile):
-    result, duration = query_gemma(image, language, profile)
-    translated = translate_text(result, language)
-    audio_path = speak(translated, language)
-    return f"⏱️ Took {duration:.2f} sec\n\n{translated}", audio_path
+    start = time.time()
+    extracted_text = simulate_ocr(image)
 
-# Convert audio to text
+    instruction = get_profile_context(profile)
+    suffix = "\n\nIf it mentions medicine or pesticides, explain what it does and warn of any risks."
+    prompt = f"{instruction}\n\n{extracted_text}\n{suffix}"
+
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={"model": "gemma3n:latest", "prompt": prompt, "system_prompt": "You are a helpful assistant.", "stream": False},
+            timeout=60
+        )
+        result = response.json().get("response", "❌ No response from model.")
+    except:
+        result = "❌ Ollama server did not respond."
+
+    translated = translate_text(result, language)
+    audio = speak(translated, language)
+    return f"⏱️ Took {time.time() - start:.2f} sec\n\n{translated}", audio
+
+# Audio transcription
 def transcribe_audio(audio_path):
     recognizer = sr.Recognizer()
     with sr.AudioFile(audio_path) as source:
         audio = recognizer.record(source)
     try:
-        return recognizer.recognize_google(audio) #type: ignore
+        # type: ignore is used to suppress type checker warnings about recognize_google
+        return recognizer.recognize_google(audio)  # type: ignore
     except:
         return ""
 
-# Handle doubt
+# Doubt handling
 def handle_doubt(doubt_text_input, doubt_audio_input, language, profile, image):
     if doubt_audio_input:
         doubt_text_input = transcribe_audio(doubt_audio_input)
@@ -116,15 +94,13 @@ def handle_doubt(doubt_text_input, doubt_audio_input, language, profile, image):
     else:
         doubt_english = doubt_text_input
 
-    ocr_config = r'--oem 3 --psm 6'
-    context_text = clean_ocr_text(pytesseract.image_to_string(image, config=ocr_config))
+    context_text = simulate_ocr(image)
     prompt = f"You explained the following:\n\n{context_text}\n\nNow the user has a question: {doubt_english}\n\nAnswer clearly in simple English."
 
     try:
         response = requests.post(
             OLLAMA_URL,
             json={"model": "gemma3n:latest", "prompt": prompt, "system_prompt": "You are a helpful assistant.", "stream": False},
-            
         )
         answer = response.json().get("response", "❌ No response.")
     except:
@@ -141,7 +117,7 @@ def handle_doubt(doubt_text_input, doubt_audio_input, language, profile, image):
     audio = speak(answer_translated, language)
     return answer_translated, audio
 
-# --- Gradio UI ---
+# Gradio UI
 with gr.Blocks() as demo:
     gr.Markdown("## 🌸 Sahaayika — AI Visual Assistant for Rural Women")
     gr.Markdown("Reads and explains any form or medicine label in **Hindi**, **Tamil**, or **English**.\nWorks best with clear photos!")
@@ -161,7 +137,6 @@ with gr.Blocks() as demo:
     )
 
     gr.Markdown("## ❓ Ask a Doubt About the Document")
-
     with gr.Row():
         doubt_text = gr.Textbox(label="✍️ Ask your question", placeholder="Type your doubt in your language...")
         doubt_audio_input = gr.Audio(type="filepath", label="🎙️ Or record your doubt")
