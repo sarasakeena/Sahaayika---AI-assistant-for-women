@@ -7,6 +7,7 @@ import uuid
 import time
 import speech_recognition as sr
 
+
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
 # Simulated OCR output (fallback for Hugging Face deployment)
