@@ -1,155 +1,223 @@
-import gradio as gr
+import re
 import requests
+import pytesseract
+import uuid
+import json
+import base64
+import io
+import os
+
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from gtts import gTTS
-from deep_translator import GoogleTranslator
-import uuid
-import time
-import speech_recognition as sr
 
-
-
+# =========================
+# CONFIG
+# =========================
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\HP\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-# Simulated OCR output (fallback for Hugging Face deployment)
-def simulate_ocr(image):
-    return "This is a sample text extracted from the uploaded image."
+# =========================
+# OFFLINE TRANSLATION SETUP
+# =========================
+import argostranslate.package
+import argostranslate.translate
 
-# Profile-based context
-def get_profile_context(profile):
-    context_map = {
-        "Woman": "Explain in very simple language for a rural woman who may not be familiar with complex forms or medical terms.",
-        "Farmer": "Explain in simple language for a rural woman who is a farmer, with examples or relevance to farming if possible.",
-        "Elderly": "Explain in slow, clear, and simple words for an elderly rural woman with possibly limited literacy.",
-        "Other": "Explain simply and clearly for someone who may not be familiar with formal documents."
-    }
-    return context_map.get(profile, context_map["Woman"])
+def install_argos_language(from_code: str, to_code: str):
+    print(f"  Checking language package: {from_code} → {to_code} ...")
+    installed = argostranslate.translate.get_installed_languages()
+    for lang in installed:
+        if lang.code == from_code:
+            for t in lang.translations_to:
+                if t.to_lang.code == to_code:
+                    print(f"  ✅ Already installed: {from_code} → {to_code}")
+                    return True
+    print(f"  ⬇️  Downloading: {from_code} → {to_code} ...")
+    argostranslate.package.update_package_index()
+    available_packages = argostranslate.package.get_available_packages()
+    matching = [p for p in available_packages if p.from_code == from_code and p.to_code == to_code]
+    if not matching:
+        print(f"  ❌ Package not found: {from_code} → {to_code}")
+        return False
+    pkg_path = matching[0].download()
+    argostranslate.package.install_from_path(pkg_path)
+    print(f"  ✅ Installed: {from_code} → {to_code}")
+    return True
 
-# Translate using Deep Translator
-def translate_text(text, lang):
-    lang_code = {'Hindi': 'hi', 'Tamil': 'ta'}.get(lang)
-    if not lang_code:
+# Try to install packages, track what's available
+print("🌐 Setting up offline translation languages...")
+TAMIL_OFFLINE = install_argos_language("en", "ta")
+HINDI_OFFLINE = install_argos_language("en", "hi")
+print("✅ Translation setup complete.\n")
+
+def translate_offline(text: str, lang: str) -> str:
+    if lang == "English":
         return text
-    try:
-        return GoogleTranslator(source='auto', target=lang_code).translate(text)
-    except Exception as e:
-        return f"🌐 Translation failed: {str(e)}"
 
-# Text to speech
-def speak(text, lang):
-    lang_code = {'Hindi': 'hi', 'Tamil': 'ta', 'English': 'en'}.get(lang, 'en')
-    filename = f"output_{uuid.uuid4().hex[:8]}.mp3"
+    target_code = "ta" if lang == "Tamil" else "hi"
+    use_offline = TAMIL_OFFLINE if lang == "Tamil" else HINDI_OFFLINE
+
+    # Try Argos offline first
+    if use_offline:
+        try:
+            translated = argostranslate.translate.translate(text, "en", target_code)
+            if translated:
+                return translated
+        except Exception as e:
+            print(f"Argos translation error: {e}")
+
+    # Fallback: deep-translator (Google Translate)
     try:
-        gTTS(text=text.replace("*", ""), lang=lang_code).save(filename)
+        from deep_translator import GoogleTranslator
+        translated = GoogleTranslator(source="en", target=target_code).translate(text)
+        if translated:
+            print(f"  ℹ️  Used Google fallback for {lang}")
+            return translated
+    except Exception as e:
+        print(f"Google translate fallback error: {e}")
+
+    return text  # Return original if all else fails
+
+
+
+# =========================
+# HELPERS
+# =========================
+def clean(text: str) -> str:
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+def speak(text: str, lang: str) -> str | None:
+    try:
+        code = {"English": "en", "Tamil": "ta", "Hindi": "hi"}.get(lang, "en")
+        os.makedirs("audio_files", exist_ok=True)
+        filename = f"audio_files/audio_{uuid.uuid4().hex[:6]}.mp3"
+        gTTS(text=text, lang=code).save(filename)
         return filename
-    except:
+    except Exception as e:
+        print(f"TTS error: {e}")
         return None
 
-# Main processing
-def process_image(image, language, profile):
-    start = time.time()
-    extracted_text = simulate_ocr(image)
-
-    instruction = get_profile_context(profile)
-    suffix = "\n\nIf it mentions medicine or pesticides, explain what it does and warn of any risks."
-    prompt = f"{instruction}\n\n{extracted_text}\n{suffix}"
-
+def call_ollama(prompt: str) -> str:
     try:
-        response = requests.post(
+        r = requests.post(
             OLLAMA_URL,
-            json={"model": "gemma3n:latest", "prompt": prompt, "system_prompt": "You are a helpful assistant.", "stream": False},
-            timeout=60
+            json={
+                "model": "phi3:mini",
+                "prompt": prompt,
+                "system": (
+                    "You are Sahaayika, a calm and caring female health assistant for rural women in India. "
+                    "Never diagnose. Never give specific dosage. Be reassuring, gentle, and use very simple language. "
+                    "Always respond in English — translation happens separately."
+                ),
+                "stream": True
+            },
+            stream=True,
+            timeout=180
         )
-        result = response.json().get("response", "❌ No response from model.")
-    except:
-        result = "❌ Ollama server did not respond."
+        out = ""
+        for line in r.iter_lines():
+            if line:
+                try:
+                    out += json.loads(line.decode()).get("response", "")
+                except Exception:
+                    pass
+        return clean(out)
+    except Exception as e:
+        return f"Could not connect to Ollama. Please make sure it is running. Error: {e}"
 
-    translated = translate_text(result, language)
-    audio = speak(translated, language)
-    return f"⏱️ Took {time.time() - start:.2f} sec\n\n{translated}", audio
+def explain_prescription(text: str, language: str):
+    prompt = f"""
+You are Sahaayika, a helpful assistant for rural women in India.
 
-# Audio transcription
-def transcribe_audio(audio_path):
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(audio_path) as source:
-        audio = recognizer.record(source)
-    try:
-        # type: ignore is used to suppress type checker warnings about recognize_google
-        return recognizer.recognize_google(audio)  # type: ignore
-    except:
-        return ""
+Identify what type of document this is:
+- Prescription, Medical Certificate, Lab Report, Discharge Summary,
+  Government/Scheme document, Insurance, Bill, or Other
 
-# Doubt handling
-def handle_doubt(doubt_text_input, doubt_audio_input, language, profile, image):
-    if doubt_audio_input:
-        doubt_text_input = transcribe_audio(doubt_audio_input)
+Then explain it in simple English in under 8 lines.
 
-    if not doubt_text_input:
-        return "⚠️ Please enter or record a question.", None
+For prescriptions: list medicines, explain OD/BD/TDS (once/twice/thrice a day). Never give dosage amounts.
+For medical certificates: mention patient name, illness, rest days.
+For lab reports: mention test names and whether values are normal or not.
+For other documents: explain what it is and what the person needs to know or do.
+If unclear: say "This document is not clear. Please show it to someone who can help."
 
-    lang_code = {'Hindi': 'hi', 'Tamil': 'ta'}.get(language)
-    if lang_code:
-        try:
-            doubt_english = GoogleTranslator(source='auto', target='en').translate(doubt_text_input)
-        except:
-            doubt_english = doubt_text_input
-    else:
-        doubt_english = doubt_text_input
+TEXT:
+{text}
+"""
 
-    context_text = simulate_ocr(image)
-    prompt = f"You explained the following:\n\n{context_text}\n\nNow the user has a question: {doubt_english}\n\nAnswer clearly in simple English."
+    answer = call_ollama(prompt)
+# ✅ SMART FALLBACK FIX
 
-    try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={"model": "gemma3n:latest", "prompt": prompt, "system_prompt": "You are a helpful assistant.", "stream": False},
-        )
-        answer = response.json().get("response", "❌ No response.")
-    except:
-        answer = "❌ Ollama did not respond."
+    lower_answer = answer.lower()
 
-    if lang_code:
-        try:
-            answer_translated = GoogleTranslator(source='auto', target=lang_code).translate(answer)
-        except:
-            answer_translated = answer
-    else:
-        answer_translated = answer
+# ✅ Only fallback if truly unclear
+    if len(answer.strip()) < 10:
+        answer = "This document is not fully clear. Please show it to a doctor, pharmacist, or trusted person for help."
 
-    audio = speak(answer_translated, language)
-    return answer_translated, audio
+    translated = translate_offline(answer, language)
+    audio_file = speak(translated, language)
 
-# Gradio UI
-with gr.Blocks() as demo:
-    gr.Markdown("## 🌸 Sahaayika — AI Visual Assistant for Rural Women")
-    gr.Markdown("Reads and explains any form or medicine label in **Hindi**, **Tamil**, or **English**.\nWorks best with clear photos!")
+    return translated, audio_file, text
 
-    with gr.Row():
-        image_input = gr.Image(type="pil", label="📸 Upload an Image")
-        language_input = gr.Radio(["Hindi", "Tamil", "English"], label="🌍 Choose Output Language", value="English")
-        profile_input = gr.Dropdown(["Woman", "Farmer", "Elderly", "Other"], label="👤 Profile Type", value="Woman")
+# =========================
+# FASTAPI APP
+# =========================
+app = FastAPI()
 
-    output_text = gr.Textbox(label="📝 Simplified Explanation", lines=10)
-    output_audio = gr.Audio(type="filepath", label="🔊 Listen to the Output")
+@app.get("/")
+def root():
+    return FileResponse("static/index.html")
+@app.post("/analyse")
+async def analyse(
+    image: UploadFile = File(...),
+    language: str = Form("English")
+):
+    img_bytes = await image.read()
 
-    gr.Button("🧠 Understand Image").click(
-        fn=process_image,
-        inputs=[image_input, language_input, profile_input],
-        outputs=[output_text, output_audio]
-    )
+    pil_image = Image.open(io.BytesIO(img_bytes)).convert("L")
 
-    gr.Markdown("## ❓ Ask a Doubt About the Document")
-    with gr.Row():
-        doubt_text = gr.Textbox(label="✍️ Ask your question", placeholder="Type your doubt in your language...")
-        doubt_audio_input = gr.Audio(type="filepath", label="🎙️ Or record your doubt")
+    # 🔥 resize (boost OCR accuracy A LOT)
+    width, height = pil_image.size
+    pil_image = pil_image.resize((width * 2, height * 2))
 
-    doubt_response_text = gr.Textbox(label="🧾 Answer to your question", lines=6)
-    doubt_audio_output = gr.Audio(type="filepath", label="🔊 Spoken Answer")
+    # 🔥 threshold
+    pil_image = pil_image.point(lambda x: 0 if int(x) < 140 else 255)
 
-    gr.Button("📩 Ask My Doubt").click(
-        fn=handle_doubt,
-        inputs=[doubt_text, doubt_audio_input, language_input, profile_input, image_input],
-        outputs=[doubt_response_text, doubt_audio_output]
-    )
+    text = pytesseract.image_to_string(
+        pil_image,
+        config='--psm 6 --oem 3'
+    ).strip()
 
-demo.launch()
+    print(f"[OCR TEXT]: {text[:200]}")
+
+    if not text.strip():
+        return JSONResponse({
+            "error": "Text is unclear. Please upload a clearer image."
+        }, status_code=400)
+
+    explanation, audio_file, raw_text = explain_prescription(text, language)
+
+    audio_b64 = None
+    if audio_file and os.path.exists(audio_file):
+        with open(audio_file, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        os.remove(audio_file)
+
+    return JSONResponse({
+        "explanation": explanation,
+        "audio": audio_b64,
+        "raw_text": raw_text
+    })
+
+
+
+
+
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,7 +1,0 @@
-gradio
-requests
-Pillow
-gTTS==2.3.2
-deep-translator
-speechrecognition
-
