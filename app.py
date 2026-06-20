@@ -1,8 +1,5 @@
 import re
-import requests
-import pytesseract
 import uuid
-import json
 import base64
 import io
 import os
@@ -13,81 +10,35 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from gtts import gTTS
 
-# =========================
-# CONFIG
-# =========================
-pytesseract.pytesseract.tesseract_cmd = r"C:\Users\HP\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
-OLLAMA_URL = "http://localhost:11434/api/generate"
+import google.generativeai as genai
 
 # =========================
-# OFFLINE TRANSLATION SETUP
+# CONFIG — Gemini Cloud API
 # =========================
-import argostranslate.package
-import argostranslate.translate
+GEMINI_API_KEY = "AIzaSyC8JdhckA8a8Zq73frxOctkk8dhyCoVji4"
+genai.configure(api_key=GEMINI_API_KEY)
 
-def install_argos_language(from_code: str, to_code: str):
-    print(f"  Checking language package: {from_code} → {to_code} ...")
-    installed = argostranslate.translate.get_installed_languages()
-    for lang in installed:
-        if lang.code == from_code:
-            for t in lang.translations_to:
-                if t.to_lang.code == to_code:
-                    print(f"  ✅ Already installed: {from_code} → {to_code}")
-                    return True
-    print(f"  ⬇️  Downloading: {from_code} → {to_code} ...")
-    argostranslate.package.update_package_index()
-    available_packages = argostranslate.package.get_available_packages()
-    matching = [p for p in available_packages if p.from_code == from_code and p.to_code == to_code]
-    if not matching:
-        print(f"  ❌ Package not found: {from_code} → {to_code}")
-        return False
-    pkg_path = matching[0].download()
-    argostranslate.package.install_from_path(pkg_path)
-    print(f"  ✅ Installed: {from_code} → {to_code}")
-    return True
+# Use gemini-1.5-flash — fast, free-tier, excellent at vision
+vision_model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Try to install packages, track what's available
-print("🌐 Setting up offline translation languages...")
-TAMIL_OFFLINE = install_argos_language("en", "ta")
-HINDI_OFFLINE = install_argos_language("en", "hi")
-print("✅ Translation setup complete.\n")
-
-def translate_offline(text: str, lang: str) -> str:
+# =========================
+# TRANSLATION (deep-translator via Google Translate)
+# =========================
+def translate_text(text: str, lang: str) -> str:
     if lang == "English":
         return text
-
-    target_code = "ta" if lang == "Tamil" else "hi"
-    use_offline = TAMIL_OFFLINE if lang == "Tamil" else HINDI_OFFLINE
-
-    # Try Argos offline first
-    if use_offline:
-        try:
-            translated = argostranslate.translate.translate(text, "en", target_code)
-            if translated:
-                return translated
-        except Exception as e:
-            print(f"Argos translation error: {e}")
-
-    # Fallback: deep-translator (Google Translate)
+    target_code = {"Tamil": "ta", "Hindi": "hi"}.get(lang, "en")
     try:
         from deep_translator import GoogleTranslator
         translated = GoogleTranslator(source="en", target=target_code).translate(text)
-        if translated:
-            print(f"  ℹ️  Used Google fallback for {lang}")
-            return translated
+        return translated if translated else text
     except Exception as e:
-        print(f"Google translate fallback error: {e}")
-
-    return text  # Return original if all else fails
-
-
+        print(f"Translation error: {e}")
+        return text
 
 # =========================
-# HELPERS
+# TTS
 # =========================
-def clean(text: str) -> str:
-    return re.sub(r"\s{2,}", " ", text).strip()
-
 def speak(text: str, lang: str) -> str | None:
     try:
         code = {"English": "en", "Tamil": "ta", "Hindi": "hi"}.get(lang, "en")
@@ -99,67 +50,57 @@ def speak(text: str, lang: str) -> str | None:
         print(f"TTS error: {e}")
         return None
 
-def call_ollama(prompt: str) -> str:
-    try:
-        r = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": "phi3:mini",
-                "prompt": prompt,
-                "system": (
-                    "You are Sahaayika, a calm and caring female health assistant for rural women in India. "
-                    "Never diagnose. Never give specific dosage. Be reassuring, gentle, and use very simple language. "
-                    "Always respond in English — translation happens separately."
-                ),
-                "stream": True
-            },
-            stream=True,
-            timeout=180
-        )
-        out = ""
-        for line in r.iter_lines():
-            if line:
-                try:
-                    out += json.loads(line.decode()).get("response", "")
-                except Exception:
-                    pass
-        return clean(out)
-    except Exception as e:
-        return f"Could not connect to Ollama. Please make sure it is running. Error: {e}"
+# =========================
+# GEMINI VISION — Core AI
+# =========================
+def call_gemini_vision(image_bytes: bytes, language: str):
+    """
+    Sends the image directly to Gemini Vision.
+    Returns (explanation_english, reminders_list)
+    """
+    img = Image.open(io.BytesIO(image_bytes))
 
-def explain_prescription(text: str, language: str):
-    prompt = f"""
-You are Sahaayika, a helpful assistant for rural women in India.
+    prompt = """You are Sahaayika, a warm, caring female health assistant for rural women in India.
 
-Identify what type of document this is:
-- Prescription, Medical Certificate, Lab Report, Discharge Summary,
-  Government/Scheme document, Insurance, Bill, or Other
+A user has uploaded a photo of a medical document. Your job is to:
 
-Then explain it in simple English in under 8 lines.
+1. Look at the image carefully and identify what type of document it is (prescription, medical certificate, lab report, discharge summary, etc.)
+2. Extract all important information: patient name, age, diagnosis, medicines, dosage, when to take them, doctor's advice, test results — whatever is present.
+3. Explain everything in simple, clear English in 6-8 lines as if speaking directly to the patient.
 
-For prescriptions: list medicines, explain OD/BD/TDS (once/twice/thrice a day). Never give dosage amounts.
-For medical certificates: mention patient name, illness, rest days.
-For lab reports: mention test names and whether values are normal or not.
-For other documents: explain what it is and what the person needs to know or do.
-If unclear: say "This document is not clear. Please show it to someone who can help."
-
-TEXT:
-{text}
+IMPORTANT RULES:
+- Be warm, reassuring, and empathetic in your tone.
+- Use simple language. Avoid medical jargon.
+- If it is a PRESCRIPTION with medicines, you MUST add this at the very end of your response on a new line, formatted EXACTLY like this example:
+[REMINDERS] Paracetamol: Morning, Night | Amoxicillin: Morning, Afternoon, Night
+(Only include medicines that are actually in the document. Use Morning / Afternoon / Evening / Night based on what the prescription says.)
+- If the image is blurry or unreadable, say: "This document is not fully clear. Please show it to a doctor or health worker for help."
+- Never diagnose. Never give specific dosage amounts beyond what is written.
 """
 
-    answer = call_ollama(prompt)
-# ✅ SMART FALLBACK FIX
+    try:
+        response = vision_model.generate_content([prompt, img])
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Vision error: {e}")
+        return f"GEMINI_ERROR: {e}"
 
-    lower_answer = answer.lower()
-
-# ✅ Only fallback if truly unclear
-    if len(answer.strip()) < 10:
-        answer = "This document is not fully clear. Please show it to a doctor, pharmacist, or trusted person for help."
-
-    translated = translate_offline(answer, language)
-    audio_file = speak(translated, language)
-
-    return translated, audio_file, text
+def parse_reminders(raw_text: str):
+    """Parse the [REMINDERS] block out of the AI response."""
+    reminders = []
+    if "[REMINDERS]" in raw_text:
+        parts = raw_text.split("[REMINDERS]")
+        clean_answer = parts[0].strip()
+        reminders_text = parts[1].strip()
+        for med_block in reminders_text.split("|"):
+            if ":" in med_block:
+                med_name, times = med_block.split(":", 1)
+                reminders.append({
+                    "medicine": med_name.strip(),
+                    "times": [t.strip() for t in times.split(",")]
+                })
+        return clean_answer, reminders
+    return raw_text, reminders
 
 # =========================
 # FASTAPI APP
@@ -169,35 +110,31 @@ app = FastAPI()
 @app.get("/")
 def root():
     return FileResponse("static/index.html")
+
 @app.post("/analyse")
 async def analyse(
     image: UploadFile = File(...),
     language: str = Form("English")
 ):
     img_bytes = await image.read()
+    print(f"[GEMINI] Processing image ({len(img_bytes)//1024} KB)...")
 
-    pil_image = Image.open(io.BytesIO(img_bytes)).convert("L")
+    raw_response = call_gemini_vision(img_bytes, language)
 
-    # 🔥 resize (boost OCR accuracy A LOT)
-    width, height = pil_image.size
-    pil_image = pil_image.resize((width * 2, height * 2))
+    if raw_response.startswith("GEMINI_ERROR"):
+        return JSONResponse({"error": "Could not process image. Please try again."}, status_code=400)
 
-    # 🔥 threshold
-    pil_image = pil_image.point(lambda x: 0 if int(x) < 140 else 255)
+    explanation_english, reminders = parse_reminders(raw_response)
 
-    text = pytesseract.image_to_string(
-        pil_image,
-        config='--psm 6 --oem 3'
-    ).strip()
+    if len(explanation_english.strip()) < 10:
+        explanation_english = "This document is not fully clear. Please show it to a doctor or health worker for help."
 
-    print(f"[OCR TEXT]: {text[:200]}")
+    print(f"[GEMINI] Response: {explanation_english[:100]}...")
+    if reminders:
+        print(f"[GEMINI] Reminders found: {reminders}")
 
-    if not text.strip():
-        return JSONResponse({
-            "error": "Text is unclear. Please upload a clearer image."
-        }, status_code=400)
-
-    explanation, audio_file, raw_text = explain_prescription(text, language)
+    translated = translate_text(explanation_english, language)
+    audio_file = speak(translated, language)
 
     audio_b64 = None
     if audio_file and os.path.exists(audio_file):
@@ -206,15 +143,70 @@ async def analyse(
         os.remove(audio_file)
 
     return JSONResponse({
-        "explanation": explanation,
+        "explanation": translated,
         "audio": audio_b64,
-        "raw_text": raw_text
+        "raw_text": explanation_english,
+        "reminders": reminders
     })
 
+@app.post("/followup")
+async def followup(
+    question: str = Form(""),
+    language: str = Form("English"),
+    context: str = Form("")
+):
+    prompt = f"""You are Sahaayika, a caring female health assistant for rural women in India.
+You previously explained this medical document to the user:
+{context}
 
+The user is now asking this follow-up question: "{question}"
 
+Answer in very simple, warm English in 2-3 lines. Never give specific dosage amounts. Be reassuring and kind."""
 
+    try:
+        response = vision_model.generate_content(prompt)
+        answer = response.text.strip()
+    except Exception as e:
+        answer = "I'm sorry, I could not connect right now. Please try again in a moment."
 
+    translated = translate_text(answer, language)
+    audio_file = speak(translated, language)
+
+    audio_b64 = None
+    if audio_file and os.path.exists(audio_file):
+        with open(audio_file, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        os.remove(audio_file)
+
+    return JSONResponse({"answer": translated, "audio": audio_b64})
+
+@app.post("/chat")
+async def general_chat(
+    question: str = Form(""),
+    language: str = Form("English")
+):
+    prompt = f"""You are Sahaayika, a calm, warm, and caring female health assistant for rural women in India.
+The user is asking a general health or wellbeing question: "{question}"
+
+Answer in very simple English in 2-3 lines. Be highly reassuring and supportive. 
+Never diagnose or give specific medication dosages. Recommend seeing a doctor for serious issues."""
+
+    try:
+        response = vision_model.generate_content(prompt)
+        answer = response.text.strip()
+    except Exception as e:
+        answer = "I'm sorry, I could not connect right now. Please try again in a moment."
+
+    translated = translate_text(answer, language)
+    audio_file = speak(translated, language)
+
+    audio_b64 = None
+    if audio_file and os.path.exists(audio_file):
+        with open(audio_file, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode()
+        os.remove(audio_file)
+
+    return JSONResponse({"answer": translated, "audio": audio_b64})
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
