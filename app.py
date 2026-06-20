@@ -9,13 +9,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from gtts import gTTS
+from dotenv import load_dotenv
+load_dotenv()
 
 import google.generativeai as genai
 
 # =========================
 # CONFIG — Gemini Cloud API
 # =========================
-GEMINI_API_KEY = "AIzaSyC8JdhckA8a8Zq73frxOctkk8dhyCoVji4"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Set the GEMINI_API_KEY environment variable before running this app.")
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Use gemini-1.5-flash — fast, free-tier, excellent at vision
