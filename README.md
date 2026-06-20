@@ -2,7 +2,7 @@
 
 > *"Sahaayika"* means **helper** in Sanskrit.
 
-Sahaayika helps rural women understand their medical prescriptions in their own language — spoken aloud, with no technical knowledge required.
+Sahaayika helps rural women understand their medical prescriptions and health documents in their own language — explained simply, spoken aloud, with no technical knowledge required.
 
 ---
 
@@ -11,122 +11,93 @@ Sahaayika helps rural women understand their medical prescriptions in their own 
 A rural woman visits a doctor and receives a handwritten prescription. She faces multiple barriers:
 
 - She **cannot read English**
-- She does not know what **OD, BD, TDS, HS, SOS** means
-- She has **no internet** at home
+- She does not know what abbreviations like **OD, BD, TDS, HS, SOS** mean
 - She is **too scared** to ask the doctor again
 - She might take the medicine **wrong**
 
-Sahaayika solves all of these problems in one tap.
+Sahaayika solves this in one upload.
 
 ---
 
 ## ✅ What Sahaayika Does
 
-1. **Scan** — Upload a photo of any handwritten or printed prescription
-2. **Understand** — Local AI reads and explains it in simple language
-3. **Translate** — Converts explanation to Tamil or Hindi (fully offline)
+1. **Scan** — Upload a photo of any handwritten or printed medical document (prescription, lab report, discharge summary, medical certificate)
+2. **Understand** — Gemini Vision reads the image directly and explains it in simple, warm language
+3. **Translate** — Converts the explanation into Tamil or Hindi
 4. **Speak** — Reads the explanation aloud so even non-readers can understand
-5. **Answer** — Tap follow-up buttons for pregnancy safety, danger signs, how to take medicines, and more
-
----
-
-## 🎯 Who Is It For?
-
-Sahaayika is designed to run on a **shared device** at:
-- Village health centres (PHC)
-- With ASHA workers
-- At rural pharmacies
-
-One installation helps hundreds of women in the village.
+5. **Remind** — Automatically extracts medicine names and dosage timing into structured reminders
+6. **Answer** — Ask follow-up questions about the document, or general health questions, and get simple, reassuring answers
 
 ---
 
 ## 🛠️ Tech Stack
 
-| Component | Technology | Offline? |
-|-----------|-----------|---------|
-| Prescription reading (OCR) | Tesseract OCR | ✅ Yes |
-| AI explanation | Ollama + Gemma 3N | ✅ Yes |
-| Translation (Tamil/Hindi) | Argostranslate | ✅ Yes |
-| Text to speech | gTTS | 🌐 Needs internet |
-| Backend | FastAPI + Python | ✅ Yes |
-| Frontend | HTML/CSS/JS | ✅ Yes |
+| Component | Technology |
+|-----------|-----------|
+| Image understanding + reasoning | Google Gemini 1.5 Flash (Vision) |
+| Translation (Tamil/Hindi) | deep_translator (Google Translate) |
+| Text to speech | gTTS |
+| Backend | FastAPI + Python |
+| Frontend | HTML/CSS/JS (PWA — installable, offline-capable shell) |
 
-> **Note:** gTTS requires internet only for audio generation. All AI processing and translation happen fully offline on the device.
+> Gemini Vision handles OCR and medical explanation in a single model call — no separate Tesseract OCR step. The model reads the image directly and returns both a plain-language explanation and a structured reminders block.
 
 ---
 
 ## 📁 Project Structure
-
-```
 sahaayika/
-├── app.py              # FastAPI backend
-├── static/
-│   └── index.html      # Frontend UI
-└── README.md
-```
 
+├── app.py              # FastAPI backend + Gemini Vision logic
+
+├── static/
+
+│   ├── index.html      # Frontend UI
+
+│   ├── manifest.json    # PWA manifest
+
+│   ├── sw.js            # Service worker (offline shell)
+
+│   └── icon.svg / bg.png
+
+├── audio_files/         # Temporary TTS audio (auto-deleted after sending)
+
+└── README.md
 ---
 
 ## ⚙️ Installation
 
-### Step 1 — Install Python libraries
+### Step 1 — Install dependencies
 ```bash
-pip install fastapi uvicorn python-multipart gradio pillow pytesseract gtts argostranslate requests
+pip install fastapi uvicorn python-multipart pillow gtts deep-translator google-generativeai python-dotenv
 ```
 
-### Step 2 — Install Tesseract OCR
-Download and install from:
-```
-https://github.com/UB-Mannheim/tesseract/wiki
-```
-Default Windows path:
-```
-C:\Users\<YourName>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe
-```
-Update this path in `app.py` if yours is different.
+### Step 2 — Set up your Gemini API key
+Get a free key from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
-### Step 3 — Install and start Ollama
-Download from: https://ollama.com/download
+Create a `.env` file in the project root:
+GEMINI_API_KEY=your_key_here
 
-Then pull the AI model (needs internet once):
-```bash
-ollama pull gemma3n
-```
+This is loaded automatically and is excluded from git via `.gitignore`.
 
-> If you want Ollama models stored on a specific drive (e.g. D:), set this before pulling:
-> ```bash
-> setx OLLAMA_MODELS D:\ollama_models
-> ```
-
-### Step 4 — Run the app
+### Step 3 — Run the app
 ```bash
 python app.py
 ```
 
 Open your browser at:
-```
 http://localhost:8000
-```
-
-> On first run, Argostranslate will automatically download Tamil and Hindi language packs (needs internet once, ~100MB). After that it works fully offline.
 
 ---
 
 ## 🖥️ How to Use
 
-1. Open `http://localhost:8000` in your browser
+1. Open the app in your browser
 2. Select your language — **Tamil**, **Hindi**, or **English**
-3. Upload a photo of the prescription (or tap **Load Sample** for demo)
+3. Upload a photo of the medical document
 4. Tap **Understand My Prescription**
 5. Read the explanation or tap **play** to listen
-6. Tap any follow-up button to ask specific questions:
-   - 🤰 Pregnancy safety
-   - 🤱 Breastfeeding safety
-   - 👶 Child safety
-   - ⚠️ Danger signs
-   - 💊 How to take medicines
-   - 🩺 Questions to ask the doctor
+6. View auto-extracted medicine reminders (if a prescription was detected)
+7. Ask a follow-up question about the document, or a general health question
 
 ---
 
@@ -143,7 +114,7 @@ http://localhost:8000
 ## ⚠️ Important Disclaimers
 
 - Sahaayika is **not a medical diagnosis tool**
-- It never recommends specific dosages
+- It never recommends specific dosage amounts beyond what's written in the document
 - It always advises users to confirm with a doctor or pharmacist
 - It is designed to **assist**, not replace, medical professionals
 
@@ -151,16 +122,16 @@ http://localhost:8000
 
 ## 🚀 Future Scope
 
-- **Android app** using a lightweight on-device model (Gemma 2B / Phi-3 Mini)
-- **More languages** — Telugu, Kannada, Bengali, Marathi
-- **Voice input** — let women speak their question instead of tapping
-- **Medicine photo recognition** — identify medicines from the tablet/packet photo
-- **WhatsApp integration** — send prescription photo via WhatsApp, get explanation back
+- Improve OCR/explanation accuracy on low-quality or heavily handwritten images
+- Add more languages — Telugu, Kannada, Bengali, Marathi
+- Voice input — let users speak their question instead of typing
+- Fully offline mode using an on-device model
+- WhatsApp integration — send a prescription photo, get an explanation back
 
 ---
 
 ## 👩‍💻 Built By
 
-Built for a social impact hackathon focused on rural healthcare accessibility in India.
+Built for a social impact hackathon (Kaggle / Gemma 3n Challenge track) focused on rural healthcare accessibility in India.
 
 *Sahaayika — because every woman deserves to understand her own health.* 🌸
